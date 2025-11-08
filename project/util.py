@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
+from kneed import KneeLocator
 from sklearn.metrics import adjusted_rand_score
 from sklearn.preprocessing import MinMaxScaler
 from matplotlib.lines import Line2D
@@ -58,9 +59,8 @@ def plot_silhouette_score_with_k(ax, features, k_start=2, k_end=9):
 def find_optimal_dbscan_params(features,
                                min_samples_range=None,
                                eps_range=None):
-
     if eps_range is None:
-        nn = NearestNeighbors(n_neighbors=min(min_samples_range))
+        nn = NearestNeighbors(n_neighbors=min_samples_range[0])
         nn.fit(features)
         distances, _ = nn.kneighbors(features)
         k_distances = np.sort(distances[:, -1])
@@ -69,41 +69,58 @@ def find_optimal_dbscan_params(features,
         eps_max = np.percentile(k_distances, 95)
         eps_range = np.linspace(eps_min, eps_max, 50)
 
-    results = {'silhouette_score': -np.inf}
-    result_labels = None
-
-    print('+ Parameter ranges:'
-          f'  {min_samples_range[0]}<minPts<{min_samples_range[-1]}'
-          f'  {eps_range[0]:.4f}<eps<{eps_range[-1]:.4f}')
-
-    for min_samples in min_samples_range:
+    results = []
+    for min_samples in range(min_samples_range[0], min_samples_range[1] + 1):
         for eps in eps_range:
             dbscan_ = DBSCAN(eps=eps, min_samples=min_samples)
             y_pred = dbscan_.fit_predict(features)
 
             unique_labels = set(y_pred)
             n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
-            n_noise = list(y_pred).count(-1)
 
-            if n_clusters < 2:
+            if n_clusters < 1:
                 continue
 
             score = silhouette_score(features, y_pred)
+            results.append({
+                'min_samples': min_samples,
+                'eps': eps,
+                'silhouette_score': score
+            })
 
-            if score > results['silhouette_score']:
-                results = {
-                    'min_samples': min_samples,
-                    'eps': eps,
-                    'silhouette_score': score,
-                    'n_clusters': n_clusters,
-                    'n_noise': n_noise
-                }
-                result_labels = y_pred
+    df = pd.DataFrame(results)
 
-    return results, result_labels
+    plt.figure(figsize=(14, 4))
+    sns.lineplot(df, x='eps', y='silhouette_score', hue='min_samples', marker='o', palette='deep')
+
+    description = ('Best Parameter Pairs within \n'
+                   + fr'{min_samples_range[0]}$\leq$minPts$\leq${min_samples_range[-1]}'
+                   + fr' and {eps_range[0]:.4f}$\leq$eps$\leq${eps_range[-1]:.4f}')
+    plt.title(description)
+
+    return df
 
 
-def plot_on_pca(features, y_real, pred=None, title='', ax=None, legend=False):
+def find_optimal_eps(df, min_samples, min_eps=0):
+    optimal_params = df[df['min_samples'] == min_samples].drop('min_samples', axis=1)
+
+    knee_search_range = optimal_params[optimal_params['eps'] >= min_eps]
+    knee_locator = KneeLocator(x=knee_search_range['eps'], y=knee_search_range['silhouette_score'],
+                               curve='concave', direction='increasing')
+    knee = knee_locator.knee
+
+    plt.figure(figsize=(14, 4))
+    sns.lineplot(optimal_params, x='eps', y='silhouette_score', marker='o')
+    plt.axvline(knee, color='k', linestyle='--')
+
+    eps_values = optimal_params['eps'].values
+    plt.xlim((eps_values[0], eps_values[-1]))
+    plt.title(f'Silhouette Scores for minPts={min_samples}')
+
+    return knee
+
+
+def plot_on_pca(ax, features, y_real, pred=None, title=''):
     pca = pd.DataFrame(PCA(n_components=2, random_state=0).fit_transform(features), columns=['pca1', 'pca2'])
 
     ax.set_title(title)
@@ -125,21 +142,21 @@ def plot_on_pca(features, y_real, pred=None, title='', ax=None, legend=False):
         classes.append(-1)
         colors[-1] = (0, 0, 0)
 
+    class_: int
     for class_, sub_df in pca.groupby('cluster'):
         sns.scatterplot(data=sub_df, x='pca1', y='pca2', style=style, markers=markers,
                         ax=ax, color=colors[class_])
 
-    if legend:
-        legend_elements = [
-            Line2D([], [], marker='s', color='w', label=f'Class {classes[class_]}',
-                   markerfacecolor=colors[class_], markeredgecolor='k', markersize=6, linestyle='None')
-            for class_ in classes
-        ]
-        if pred is not None:
-            legend_elements.extend([
-                Line2D([], [], marker='o', color='w', label='Correct',
-                       markerfacecolor='gray', markeredgecolor='k', markersize=6, linestyle='None'),
-                Line2D([], [], marker='x', color='w', label='Incorrect',
-                       markeredgecolor='k', markersize=6, markeredgewidth=1.5, linestyle='None')
-            ])
-        ax.legend(handles=legend_elements)
+    legend_elements = [
+        Line2D([], [], marker='s', color='w', label=f'Class {classes[class_]}',
+               markerfacecolor=colors[class_], markeredgecolor='k', markersize=6, linestyle='None')
+        for class_ in classes
+    ]
+    if pred is not None:
+        legend_elements.extend([
+            Line2D([], [], marker='o', color='w', label='Correct',
+                   markerfacecolor='gray', markeredgecolor='k', markersize=6, linestyle='None'),
+            Line2D([], [], marker='x', color='w', label='Incorrect',
+                   markeredgecolor='k', markersize=6, markeredgewidth=1.5, linestyle='None')
+        ])
+    ax.legend(handles=legend_elements)
